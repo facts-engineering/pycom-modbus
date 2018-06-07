@@ -74,3 +74,34 @@ def validate_resp_data(data, function_code, address, value=None, quantity=None, 
             return True
 
     return False
+
+def response(function_code, request_register_addr, request_register_qty, request_data, value_list=None, signed=True):
+    if function_code in [Const.READ_COILS, Const.READ_DISCRETE_INPUTS]:
+        sectioned_list = [value_list[i:i + 8] for i in range(0, len(value_list), 8)]
+
+        output_value=[]
+        for index, byte in enumerate(sectioned_list):
+            output = sum(v << i for i, v in enumerate(byte))
+            output_value.append(output)
+
+        fmt = 'B' * len(output_value)
+
+        return struct.pack('>BB' + fmt, function_code, ((len(value_list) - 1) // 8) + 1, *output_value)
+
+    elif function_code in [Const.READ_HOLDING_REGISTERS, Const.READ_INPUT_REGISTER]:
+        quantity = len(value_list)
+
+        if not (0x0001 <= quantity <= 0x007D):
+            raise ValueError('invalid number of registers')
+
+        fmt = ('h' if signed else 'H') * quantity
+        return struct.pack('>BB' + fmt, function_code, quantity * 2, *value_list)
+
+    elif function_code in [Const.WRITE_SINGLE_COIL, Const.WRITE_SINGLE_REGISTER]:
+        return struct.pack('>BHBB', function_code, request_register_addr, *request_data)
+
+    elif function_code in [Const.WRITE_MULTIPLE_COILS, Const.WRITE_MULTIPLE_REGISTERS]:
+        return struct.pack('>BHH', function_code, request_register_addr, request_register_qty)
+
+def exception_response(function_code, exception_code):
+    return struct.pack('>BB', Const.ERROR_BIAS + function_code, exception_code)
