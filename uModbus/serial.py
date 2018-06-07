@@ -10,12 +10,16 @@ class Serial:
 
     def __init__(self, uart_id, baudrate=9600, data_bits=8, stop_bits=1, parity=None, pins=None, ctrl_pin=None):
         self._uart = UART(uart_id, baudrate=baudrate, bits=data_bits, parity=parity, \
-                          stop=stop_bits, timeout_chars=10, pins=pins)
+                          stop=stop_bits, timeout_chars=2, pins=pins)
         if ctrl_pin is not None:
             self._ctrlPin = Pin(ctrl_pin, mode=Pin.OUT)
         else:
             self._ctrlPin = None
-        self.char_time_ms = (1000 * (data_bits + stop_bits + 2)) // baudrate
+
+        if baudrate <= 19200:
+            self._t35chars = (3500000 * (data_bits + stop_bits + 2)) // baudrate
+        else:
+            self._t35chars = 1750
 
     def _calculate_crc16(self, data):
         crc = 0xFFFF
@@ -64,7 +68,24 @@ class Serial:
 
         return response
 
-    def _send_receive(self, modbus_pdu, slave_addr, count):
+    def _uart_read_frame(self, timeout=None):
+        bytes = bytearray()
+
+        start_ms = time.ticks_ms()
+        while timeout == None or time.ticks_diff(start_ms, time.ticks_ms()) <= timeout:
+            last_byte_ts = time.ticks_us()
+            while time.ticks_diff(last_byte_ts, time.ticks_us()) <= self._t35chars:
+                r = self._uart.readall()
+                if r != None:
+                    bytes.extend(r)
+                    last_byte_ts = time.ticks_us()
+
+            if len(bytes) > 0:
+                return bytes
+
+        return bytes
+
+    def _send(self, modbus_pdu, slave_addr):
         serial_pdu = bytearray()
         serial_pdu.append(slave_addr)
         serial_pdu.extend(modbus_pdu)
@@ -72,17 +93,19 @@ class Serial:
         crc = self._calculate_crc16(serial_pdu)
         serial_pdu.extend(crc)
 
-        # flush the Rx FIFO
-        self._uart.read()
         if self._ctrlPin:
             self._ctrlPin(1)
         self._uart.write(serial_pdu)
         if self._ctrlPin:
             while not self._uart.wait_tx_done(2):
                 machine.idle()
-            time.sleep_ms(1 + self.char_time_ms)
+            time.sleep_us(self._t35chars)
             self._ctrlPin(0)
 
+    def _send_receive(self, modbus_pdu, slave_addr, count):
+        # flush the Rx FIFO
+        self._uart.read()
+        self._send(modbus_pdu, slave_addr)
         return self._validate_resp_hdr(self._uart_read(), slave_addr, modbus_pdu[0], count)
 
     def _validate_resp_hdr(self, response, slave_addr, function_code, count):
