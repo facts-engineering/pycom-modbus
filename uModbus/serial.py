@@ -1,5 +1,7 @@
 import uModBus.functions as functions
 import uModBus.const as Const
+from uModBus.common import Request
+from uModBus.common import ModbusException
 from machine import UART
 from machine import Pin
 import struct
@@ -195,3 +197,34 @@ class Serial:
                                                         starting_address, quantity=len(register_values))
 
         return operation_status
+
+    def send_response(self, slave_addr, function_code, request_register_addr, request_register_qty, request_data, values=None, signed=True):
+        modbus_pdu = functions.response(function_code, request_register_addr, request_register_qty, request_data, values, signed)
+        self._send(modbus_pdu, slave_addr)
+
+    def send_exception_response(self, slave_addr, function_code, exception_code):
+        modbus_pdu = functions.exception_response(function_code, exception_code)
+        self._send(modbus_pdu, slave_addr)
+
+    def get_request(self, unit_addr_list, timeout=None):
+        req = self._uart_read_frame(timeout)
+
+        if len(req) < 8:
+            return None
+
+        if req[0] not in unit_addr_list:
+            return None
+
+        req_crc = req[-Const.CRC_LENGTH:]
+        req_no_crc = req[:-Const.CRC_LENGTH]
+        expected_crc = self._calculate_crc16(req_no_crc)
+        if (req_crc[0] != expected_crc[0]) or (req_crc[1] != expected_crc[1]):
+            return None
+
+        try:
+            request = Request(self, req_no_crc)
+        except ModbusException as e:
+            self.send_exception_response(req[0], e.function_code, e.exception_code)
+            return None
+
+        return request
