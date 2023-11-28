@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-#
 # Copyright (c) 2019, Pycom Limited.
 #
 # This software is licensed under the GNU GPL version 3 or any
@@ -7,43 +5,46 @@
 # see the Pycom Licence v1.0 document supplied with this file, or
 # available at https://www.pycom.io/opensource/licensing
 #
-import uModBus.functions as functions
-import uModBus.const as Const
-from uModBus.common import Request
-from uModBus.common import ModbusException
-import struct
-import socket
-import machine
+# Modified by FACTS Engineering 2023
+
 import time
+import struct
+from random import getrandbits
+import uModBus.const as Const
+from uModBus.common import Server, Client
+from uModBus.common import ModbusException
 
-class TCP:
 
-    def __init__(self, slave_ip, slave_port=502, timeout=5):
+class TCPClient(Client):
+
+    def __init__(self, socket, server_ip, *, server_port=502, default_unit_id=255, timeout=5):
+        super().__init__(default_unit_id)
         self._sock = socket.socket()
-        self._sock.connect(socket.getaddrinfo(slave_ip, slave_port)[0][-1])
+        self._addrinfo = socket.getaddrinfo(server_ip, server_port)[0][-1]
+        self.connect()
         self._sock.settimeout(timeout)
 
+    def connect(self):
+        """Connect to Server"""
+        self._sock.connect(self._addrinfo)
+    
+    def disconnect(self):
+        """Disconnect from server"""
+        self._sock.disconnect()
+
+    @property
+    def connected(self):
+        """Return if socket is connected to the server"""
+        return self._sock._connected
+
     def _create_mbap_hdr(self, slave_id, modbus_pdu):
-        trans_id = machine.rng() & 0xFFFF
+        trans_id = getrandbits(16) & 0xFFFF
         mbap_hdr = struct.pack('>HHHB', trans_id, 0, len(modbus_pdu) + 1, slave_id)
 
         return mbap_hdr, trans_id
 
-    def _bytes_to_bool(self, byte_list):
-        bool_list = []
-        for index, byte in enumerate(byte_list):
-            bool_list.extend([bool(byte & (1 << n)) for n in range(8)])
-
-        return bool_list
-
-    def _to_short(self, byte_array, signed=True):
-        response_quantity = int(len(byte_array) / 2)
-        fmt = '>' + (('h' if signed else 'H') * response_quantity)
-
-        return struct.unpack(fmt, byte_array)
-
     def _validate_resp_hdr(self, response, trans_id, slave_id, function_code, count=False):
-        rec_tid, rec_pid, rec_len, rec_uid, rec_fc = struct.unpack('>HHHBB', response[:Const.MBAP_HDR_LENGTH + 1])
+        rec_tid, rec_pid, rec_len, rec_uid, rec_fc, rec_ec = struct.unpack('>HHHBBB', response[:Const.MBAP_HDR_LENGTH + 2])
         if (trans_id != rec_tid):
             raise ValueError('wrong transaction Id')
 
@@ -54,7 +55,7 @@ class TCP:
             raise ValueError('wrong slave Id')
 
         if (rec_fc == (function_code + Const.ERROR_BIAS)):
-            raise ValueError('slave returned exception code: {:d}'.format(rec_fc))
+            raise ValueError('slave returned exception code: {:d}'.format(rec_ec))
 
         hdr_length = (Const.MBAP_HDR_LENGTH + 2) if count else (Const.MBAP_HDR_LENGTH + 1)
 
@@ -64,173 +65,98 @@ class TCP:
         mbap_hdr, trans_id = self._create_mbap_hdr(slave_id, modbus_pdu)
         self._sock.send(mbap_hdr + modbus_pdu)
 
-        response = self._sock.recv(256)
+        timeout = self._sock.gettimeout()
+        stamp = time.monotonic()
+
+        while self._sock._available() < Const.MBAP_HDR_LENGTH and time.monotonic() - stamp < timeout:
+            pass
+
+        response = self._sock.recv(Const.MAX_MSG_LENGTH)
+        if len(response) == 0:
+            raise TimeoutError("No response received")
         modbus_data = self._validate_resp_hdr(response, trans_id, slave_id, modbus_pdu[0], count)
 
         return modbus_data
 
-    def read_coils(self, slave_addr, starting_addr, coil_qty):
-        modbus_pdu = functions.read_coils(starting_addr, coil_qty)
 
-        response = self._send_receive(slave_addr, modbus_pdu, True)
-        status_pdu = self._bytes_to_bool(response)
+class TCPServer(Server):
 
-        return status_pdu
-
-    def read_discrete_inputs(self, slave_addr, starting_addr, input_qty):
-        modbus_pdu = functions.read_discrete_inputs(starting_addr, input_qty)
-
-        response = self._send_receive(slave_addr, modbus_pdu, True)
-        status_pdu = self._bytes_to_bool(response)
-
-        return status_pdu
-
-    def read_holding_registers(self, slave_addr, starting_addr, register_qty, signed = True):
-        modbus_pdu = functions.read_holding_registers(starting_addr, register_qty)
-
-        response = self._send_receive(slave_addr, modbus_pdu, True)
-        register_value = self._to_short(response, signed)
-
-        return register_value
-
-    def read_input_registers(self, slave_addr, starting_address, register_quantity, signed = True):
-        modbus_pdu = functions.read_input_registers(starting_address, register_quantity)
-
-        response = self._send_receive(slave_addr, modbus_pdu, True)
-        register_value = self._to_short(response, signed)
-
-        return register_value
-
-    def write_single_coil(self, slave_addr, output_address, output_value):
-        modbus_pdu = functions.write_single_coil(output_address, output_value)
-
-        response = self._send_receive(slave_addr, modbus_pdu, False)
-        operation_status = functions.validate_resp_data(response, Const.WRITE_SINGLE_COIL,
-                                                        output_address, value=output_value, signed=False)
-
-        return operation_status
-
-    def write_single_register(self, slave_addr, register_address, register_value, signed=True):
-        modbus_pdu = functions.write_single_register(register_address, register_value, signed)
-
-        response = self._send_receive(slave_addr, modbus_pdu, False)
-        operation_status = functions.validate_resp_data(response, Const.WRITE_SINGLE_REGISTER,
-                                                        register_address, value=register_value, signed=signed)
-
-        return operation_status
-
-    def write_multiple_coils(self, slave_addr, starting_address, output_values):
-        modbus_pdu = functions.write_multiple_coils(starting_address, output_values)
-
-        response = self._send_receive(slave_addr, modbus_pdu, False)
-        operation_status = functions.validate_resp_data(response, Const.WRITE_MULTIPLE_COILS,
-                                                        starting_address, quantity=len(output_values))
-
-        return operation_status
-
-    def write_multiple_registers(self, slave_addr, starting_address, register_values, signed=True):
-        modbus_pdu = functions.write_multiple_registers(starting_address, register_values, signed)
-
-        response = self._send_receive(slave_addr, modbus_pdu, False)
-        operation_status = functions.validate_resp_data(response, Const.WRITE_MULTIPLE_REGISTERS,
-                                                        starting_address, quantity=len(register_values))
-
-        return operation_status
-
-class TCPServer:
-
-    def __init__(self):
+    def __init__(self, socket, local_ip, *, local_port=502, unit_addr=None, number_coils=None, number_discrete_inputs=None,
+    number_input_registers=None, number_holding_registers=None):
+        super().__init__(
+            unit_addr, 
+            number_coils=number_coils, 
+            number_discrete_inputs=number_discrete_inputs, 
+            number_input_registers=number_input_registers,
+            number_holding_registers=number_holding_registers
+            )
         self._sock = None
         self._client_sock = None
+        self._socket_source = socket
+        self._local_ip = local_ip
+        self._local_port = local_port
 
-    def bind(self, local_ip, local_port=502):
-        if self._client_sock:
-            self._client_sock.close()
-        if self._sock:
-            self._sock.close()
-        self._sock = socket.socket()
-        self._sock.bind(socket.getaddrinfo(local_ip, local_port)[0][-1])
+
+    def _listen(self):
+        self._sock.bind((self._local_ip, self._local_port))
         self._sock.listen()
 
+        
     def _send(self, modbus_pdu, slave_addr):
         size = len(modbus_pdu)
         fmt = 'B' * size
-        adu = struct.pack('>HHHB' + fmt, self._req_tid, 0, size + 1, slave_addr, *modbus_pdu)
-        self._client_sock.send(adu)
-
-    def send_response(self, slave_addr, function_code, request_register_addr, request_register_qty, request_data, values=None, signed=True):
-        modbus_pdu = functions.response(function_code, request_register_addr, request_register_qty, request_data, values, signed)
-        self._send(modbus_pdu, slave_addr)
-
-    def send_exception_response(self, slave_addr, function_code, exception_code):
-        modbus_pdu = functions.exception_response(function_code, exception_code)
-        self._send(modbus_pdu, slave_addr)
-
-    def _accept_request(self, accept_timeout, unit_addr_list):
-        self._sock.settimeout(accept_timeout)
-        new_client_sock = None
+        adu = struct.pack('>HHHB', self._req_tid, 0, size + 1, slave_addr) + modbus_pdu
         try:
-            new_client_sock, client_address = self._sock.accept()
-        except OSError as e:
-            if e.args[0] != 11: # 11 = timeout expired
-                raise e
+            self._client_sock.send(adu)
+        except Exception as e:
+            self._client_sock.close()
+            self._client_sock = None
+            raise e
 
-        if new_client_sock != None:
-            if self._client_sock != None:
-                self._client_sock.close()
-            self._client_sock = new_client_sock
-            self._client_sock.settimeout(0) # recv() timeout
 
-        if self._client_sock != None:
-            try:
-                req = self._client_sock.recv(128)
-                if len(req) == 0:
-                    return None
+    def _accept_request(self, accept_timeout):
 
-                req_header_no_uid = req[:Const.MBAP_HDR_LENGTH - 1]
-                self._req_tid, req_pid, req_len = struct.unpack('>HHH', req_header_no_uid)
-                req_uid_and_pdu = req[Const.MBAP_HDR_LENGTH - 1:Const.MBAP_HDR_LENGTH + req_len - 1]
-
+        start = time.monotonic()
+        self._sock.settimeout(accept_timeout)
+        while time.monotonic() - start < accept_timeout and (self._client_sock == None or self._client_sock._socket_closed == True):
+            try: 
+                self._client_sock, addr = self._sock.accept()
             except TimeoutError:
-                return None
-            except Exception as e:
-                print("Modbus request error:", e)
-                self._client_sock.close()
-                self._client_sock = None
-                return None
+                pass
+        if self._client_sock == None:
+            return None
+        self._client_sock.settimeout(.000001)
+        while time.monotonic() - start < accept_timeout:
+            try: 
+                if self._client_sock._available() >= Const.MBAP_HDR_LENGTH:
+                    break
+            except TimeoutError:
+                pass
+        if self._client_sock._available() < Const.MBAP_HDR_LENGTH:
+            return None
+        req = self._client_sock.recv(Const.MAX_MSG_LENGTH)
 
-            if (req_pid != 0):
-                print("Modbus request error: PID not 0")
-                self._client_sock.close()
-                self._client_sock = None
-                return None
+        req_header_no_uid = req[:Const.MBAP_HDR_LENGTH - 1]
+        self._req_tid, req_pid, req_len = struct.unpack('>HHH', req_header_no_uid)
+        req_uid_and_pdu = req[Const.MBAP_HDR_LENGTH - 1:Const.MBAP_HDR_LENGTH + req_len - 1]
+        if (req_pid != 0):
+            self._client_sock.close()
+            self._client_sock = None
+            return None
+        try:
+            r = self.handle_request(req_uid_and_pdu)
+            self._client_sock.close()
+            self._client_sock = None
+            return r
+        except ModbusException as e:
+            # print("Modbus request error:", e)
+            self.send_exception_response(req[0], e.function_code, e.exception_code)
+            return None
 
-            if unit_addr_list != None and req_uid_and_pdu[0] not in unit_addr_list:
-                return None
+    def poll(self, timeout=.000001):
+        if self._sock == None or self._sock._socket_closed == True:
+            self._sock = self._socket_source.socket()
+            self._listen()
+            self._sock.settimeout(.1)
 
-            try:
-                return Request(self, req_uid_and_pdu)
-            except ModbusException as e:
-                self.send_exception_response(req[0], e.function_code, e.exception_code)
-                return None
-
-    def get_request(self, unit_addr_list=None, timeout=None):
-        if self._sock == None:
-            raise Exception('Modbus TCP server not bound')
-
-        if timeout > 0:
-            start_ms = time.ticks_ms()
-            elapsed = 0
-            while True:
-                if self._client_sock == None:
-                    accept_timeout = None if timeout == None else (timeout - elapsed) / 1000
-                else:
-                    accept_timeout = 0
-                req = self._accept_request(accept_timeout, unit_addr_list)
-                if req:
-                    return req
-                elapsed = time.ticks_diff(start_ms, time.ticks_ms())
-                if elapsed > timeout:
-                    return None
-        else:
-            return self._accept_request(0, unit_addr_list)
+        return self._accept_request(timeout)

@@ -7,6 +7,9 @@
 # see the Pycom Licence v1.0 document supplied with this file, or
 # available at https://www.pycom.io/opensource/licensing
 #
+# Modified by FACTS Engineering 2023
+#
+#
 # function codes
 READ_DISCRETE_INPUTS = 0x02
 
@@ -50,6 +53,8 @@ RESPONSE_HDR_LENGTH = 0x02
 ERROR_RESP_LEN = 0x05
 FIXED_RESP_LEN = 0x08
 MBAP_HDR_LENGTH = 0x07
+
+MAX_MSG_LENGTH = 253
 
 CRC16_TABLE = (
     0x0000,0xC0C1,0xC181,0x0140,0xC301,0x03C0,0x0280,0xC241,0xC601,

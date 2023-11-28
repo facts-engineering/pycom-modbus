@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-#
 # Copyright (c) 2019, Pycom Limited.
 #
 # This software is licensed under the GNU GPL version 3 or any
@@ -7,6 +5,8 @@
 # see the Pycom Licence v1.0 document supplied with this file, or
 # available at https://www.pycom.io/opensource/licensing
 #
+# Modified by FACTS Engineering 2023
+
 import uModBus.const as Const
 import struct
 
@@ -35,8 +35,8 @@ def read_input_registers(starting_address, quantity):
     return struct.pack('>BHH', Const.READ_INPUT_REGISTER, starting_address, quantity)
 
 def write_single_coil(output_address, output_value):
-    if output_value not in [0x0000, 0xFF00]:
-        raise ValueError('Illegal coil value')
+    if output_value != 0:
+        output_value = 0xFF00
 
     return struct.pack('>BHH', Const.WRITE_SINGLE_COIL, output_address, output_value)
 
@@ -84,7 +84,7 @@ def validate_resp_data(data, function_code, address, value=None, quantity=None, 
 
     return False
 
-def response(function_code, request_register_addr, request_register_qty, request_data, value_list=None, signed=True):
+def response(function_code, request_register_addr, request_register_qty, request_data, value_list=None, signed=False):
     if function_code in [Const.READ_COILS, Const.READ_DISCRETE_INPUTS]:
         sectioned_list = [value_list[i:i + 8] for i in range(0, len(value_list), 8)]
 
@@ -98,9 +98,6 @@ def response(function_code, request_register_addr, request_register_qty, request
 
     elif function_code in [Const.READ_HOLDING_REGISTERS, Const.READ_INPUT_REGISTER]:
         quantity = len(value_list)
-
-        if not (0x0001 <= quantity <= 0x007D):
-            raise ValueError('invalid number of registers')
 
         if signed == True or signed == False:
             fmt = ('h' if signed else 'H') * quantity
