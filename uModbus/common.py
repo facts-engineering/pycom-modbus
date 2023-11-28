@@ -1,77 +1,271 @@
-import uModBus.const as Const
 import struct
+import uModBus.const as Const
+import uModBus.functions as functions
 
-class Request:
-    def __init__(self, interface, data):
-        self._itf = interface
-        self.unit_addr = data[0]
-        self.function, self.register_addr = struct.unpack_from('>BH', data, 1)
+class Client:
+    def __init__(self, default_unit_id):
+        self._default_unit_id = default_unit_id
+        pass
 
-        if self.function in [Const.READ_COILS, Const.READ_DISCRETE_INPUTS]:
-            self.quantity = struct.unpack_from('>H', data, 4)[0]
-            if self.quantity < 0x0001 or self.quantity > 0x07D0:
-                raise ModbusException(self.function, Const.ILLEGAL_DATA_VALUE)
-            self.data = None
+    def read_coils(self, starting_addr, coil_qty, *, unit=None):
+        modbus_pdu = functions.read_coils(starting_addr, coil_qty)
+        if unit is None:
+            unit = self._default_unit_id
 
-        elif self.function in [Const.READ_HOLDING_REGISTERS, Const.READ_INPUT_REGISTER]:
-            self.quantity = struct.unpack_from('>H', data, 4)[0]
-            if self.quantity < 0x0001 or self.quantity > 0x007D:
-                raise ModbusException(self.function, Const.ILLEGAL_DATA_VALUE)
-            self.data = None
+        response = self._send_receive(unit, modbus_pdu, True)
+        status_pdu = self._bytes_to_bool(response)
 
-        elif self.function == Const.WRITE_SINGLE_COIL:
-            self.quantity = None
-            self.data = data[4:6]
+        return status_pdu[:coil_qty]
+
+    def read_discrete_inputs(self, starting_addr, input_qty, *, unit=None):
+        modbus_pdu = functions.read_discrete_inputs(starting_addr, input_qty)
+        if unit is None:
+            unit = self._default_unit_id
+
+        response = self._send_receive(unit, modbus_pdu, True)
+        status_pdu = self._bytes_to_bool(response)
+
+        return status_pdu[:input_qty]
+
+    def read_holding_registers(self, starting_addr, register_qty, *, unit=None, signed = True):
+        modbus_pdu = functions.read_holding_registers(starting_addr, register_qty)
+        if unit is None:
+            unit = self._default_unit_id
+
+        response = self._send_receive(unit, modbus_pdu, True)
+        register_value = self._to_short(response, signed)
+
+        return register_value
+
+    def read_input_registers(self, starting_address, register_quantity, *, unit=None, signed = True):
+        modbus_pdu = functions.read_input_registers(starting_address, register_quantity)
+        if unit is None:
+            unit = self._default_unit_id
+            
+        response = self._send_receive(unit, modbus_pdu, True)
+        register_value = self._to_short(response, signed)
+
+        return register_value
+
+    def write_single_coil(self, output_address, output_value, *, unit=None):
+        modbus_pdu = functions.write_single_coil(output_address, output_value)
+        if unit is None:
+            unit = self._default_unit_id
+            
+        response = self._send_receive(unit, modbus_pdu, False)
+        operation_status = functions.validate_resp_data(response, Const.WRITE_SINGLE_COIL,
+                                                        output_address, value=output_value, signed=False)
+
+        return operation_status
+
+    def write_single_register(self, register_address, register_value, *, unit=None, signed=True):
+        modbus_pdu = functions.write_single_register(register_address, register_value, signed)
+        if unit is None:
+            unit = self._default_unit_id
+
+
+        response = self._send_receive(unit, modbus_pdu, False)
+        operation_status = functions.validate_resp_data(response, Const.WRITE_SINGLE_REGISTER,
+                                                        register_address, value=register_value, signed=signed)
+
+        return operation_status
+
+    def write_multiple_coils(self, starting_address, output_values, *, unit=None):
+        modbus_pdu = functions.write_multiple_coils(starting_address, output_values)
+        if unit is None:
+            unit = self._default_unit_id
+
+        response = self._send_receive(unit, modbus_pdu, False)
+        operation_status = functions.validate_resp_data(response, Const.WRITE_MULTIPLE_COILS,
+                                                        starting_address, quantity=len(output_values))
+
+        return operation_status
+
+    def write_multiple_registers(self, starting_address, register_values, *, unit=None, signed=True):
+        modbus_pdu = functions.write_multiple_registers(starting_address, register_values, signed)
+        if unit is None:
+            unit = self._default_unit_id
+
+        response = self._send_receive(unit, modbus_pdu, False)
+        operation_status = functions.validate_resp_data(response, Const.WRITE_MULTIPLE_REGISTERS,
+                                                        starting_address, quantity=len(register_values))
+
+        return operation_status
+
+    def _bytes_to_bool(self, byte_list):
+        bool_list = []
+        for index, byte in enumerate(byte_list):
+            bool_list.extend([bool(byte & (1 << n)) for n in range(8)])
+
+        return bool_list
+
+    def _to_short(self, byte_array, signed=True):
+        response_quantity = int(len(byte_array) / 2)
+        fmt = '>' + (('h' if signed else 'H') * response_quantity)
+
+        return struct.unpack(fmt, byte_array)
+
+class Server:
+    def __init__(self, unit_addr=None, *, number_coils=None, number_discrete_inputs=None,
+    number_input_registers=None, number_holding_registers=None):
+        self.unit_addr = unit_addr 
+
+        if number_coils is not None:
+            self.coils = [0] * number_coils
+
+        if number_discrete_inputs is not None:
+            self.discrete_inputs = [0] * number_discrete_inputs
+      
+        if number_input_registers is not None:
+            self.input_registers = [0] * number_input_registers
+
+        if number_holding_registers is not None:
+            self.holding_registers = [0] * number_holding_registers
+
+       
+    def handle_request(self, data):
+        unit_addr = data[0]
+        if self.unit_addr is not None and self.unit_addr != unit_addr:
+            print(f"Unit address {unit_addr} does not match {self.unit_addr}")
+            return
+
+        function_code, address = struct.unpack_from('>BH', data, 1)
+
+        if function_code in [Const.READ_COILS, Const.READ_DISCRETE_INPUTS]:
+            quantity = struct.unpack_from('>H', data, 4)[0]
+            if not self._within_limits(function_code, quantity, address):
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                return
+            if function_code == Const.READ_COILS:
+                data = self.coils[address:address+quantity]
+            else:
+                data = self.discrete_inputs[address:address+quantity]
+
+        elif function_code in [Const.READ_HOLDING_REGISTERS, Const.READ_INPUT_REGISTER]:
+            quantity = struct.unpack_from('>H', data, 4)[0]
+            if not self._within_limits(function_code, quantity, address):
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                return
+
+            if function_code == Const.READ_HOLDING_REGISTERS:
+                data = self.holding_registers[address:address+quantity]
+            else:
+                data = self.input_registers[address:address+quantity]
+
+        elif function_code == Const.WRITE_SINGLE_COIL:
+            quantity = None
+            data = data[4:6]
+            if not self._within_limits(function_code, quantity, address):
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                return
             # allowed values: 0x0000 or 0xFF00
-            if (self.data[0] not in [0x00, 0xFF]) or self.data[1] != 0x00:
-                raise ModbusException(self.function, Const.ILLEGAL_DATA_VALUE)
+            if (data[0] not in [0x00, 0xFF]) or data[1] != 0x00:
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                return
+            self.coils[address] = data[0] & 1
 
-        elif self.function == Const.WRITE_SINGLE_REGISTER:
-            self.quantity = None
-            self.data = data[4:6]
+        elif function_code == Const.WRITE_SINGLE_REGISTER:
+            quantity = None
+            data = data[4:6]
+            if not self._within_limits(function_code, quantity, address):
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                return
+            self.holding_registers[address] = self.data_as_registers(data, 1)[0]
             # all values allowed
 
-        elif self.function == Const.WRITE_MULTIPLE_COILS:
-            self.quantity = struct.unpack_from('>H', data, 4)[0]
-            if self.quantity < 0x0001 or self.quantity > 0x07D0:
-                raise ModbusException(self.function, Const.ILLEGAL_DATA_VALUE)
-            self.data = data[7:]
-            if len(self.data) != ((self.quantity - 1) // 8) + 1:
-                raise ModbusException(self.function, Const.ILLEGAL_DATA_VALUE)
+        elif function_code == Const.WRITE_MULTIPLE_COILS:
+            quantity = struct.unpack_from('>H', data, 4)[0]
+            if not self._within_limits(function_code, quantity, address):
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                raise ModbusException(function_code, Const.ILLEGAL_DATA_VALUE, self)
+            data = data[7:]
+            if len(data) != ((quantity - 1) // 8) + 1:
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                raise ModbusException(function_code, Const.ILLEGAL_DATA_VALUE, self)
+            self.coils[address:address+quantity] = self.data_as_bits(data, quantity)
 
-        elif self.function == Const.WRITE_MULTIPLE_REGISTERS:
-            self.quantity = struct.unpack_from('>H', data, 4)[0]
-            if self.quantity < 0x0001 or self.quantity > 0x007B:
-                raise ModbusException(self.function, Const.ILLEGAL_DATA_VALUE)
-            self.data = data[7:]
-            if len(self.data) != self.quantity * 2:
-                raise ModbusException(self.function, Const.ILLEGAL_DATA_VALUE)
+        elif function_code == Const.WRITE_MULTIPLE_REGISTERS:
+            quantity = struct.unpack_from('>H', data, 4)[0]
+            if not self._within_limits(function_code, quantity, address):
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                return
+            data = data[7:]
+            if len(data) != quantity * 2:
+                self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
+                raise ModbusException(function_code, Const.ILLEGAL_DATA_VALUE, self)
+            self.holding_registers[address:address+quantity] = [i for i in self.data_as_registers(data, quantity)]
 
         else:
             # Not implemented functions
-            self.quantity = None
-            self.data = data[4:]
+            quantity = None
+            data = data[4:]
+            self.send_exception(function_code, Const.ILLEGAL_FUNCTION)
+            return
+ 
+        self.send_response(unit_addr, function_code, address, quantity, data, data)
 
-    def send_response(self, values=None, signed=True):
-        self._itf.send_response(self.unit_addr, self.function, self.register_addr, self.quantity, self.data, values, signed)
+        return (function_code, address, quantity)
 
-    def send_exception(self, exception_code):
-        self._itf.send_exception_response(self.unit_addr, self.function, exception_code)
+    def send_response(self, slave_addr, function_code, request_register_addr, request_register_qty, request_data, values=None, signed=False):
+        modbus_pdu = functions.response(function_code, request_register_addr, request_register_qty, request_data, values, signed)
+        self._send(modbus_pdu, slave_addr)
 
-    def data_as_bits(self):
+    def send_exception_response(self, slave_addr, function_code, exception_code):
+        modbus_pdu = functions.exception_response(function_code, exception_code)
+        self._send(modbus_pdu, slave_addr)
+
+    def send_exception(self, function_code, exception_code):
+        addr = self.unit_addr
+        if addr is None:
+            addr = 255
+        self.send_exception_response(addr, function_code, exception_code)
+
+
+    def data_as_bits(self, data, quantity):
         bits = []
-        for byte in self.data:
+        for byte in data:
             for i in range(0, 8):
                 bits.append((byte >> i) & 1)
-                if len(bits) == self.quantity:
+                if len(bits) == quantity:
                     return bits
 
-    def data_as_registers(self, signed=True):
-        qty = self.quantity if (self.quantity != None) else 1
+    def data_as_registers(self, data, quantity, signed=False):
+        if quantity is not None:
+            qty = quantity  
+        else: 
+            qty = 1
         fmt = ('h' if signed else 'H') * qty
-        return struct.unpack('>' + fmt, self.data)
+        return struct.unpack('>' + fmt, data)
+
+    def _within_limits(self, function_code, quantity, address):
+       
+        if function_code == Const.READ_DISCRETE_INPUTS:
+            object_count = len(self.discrete_inputs)
+            quantity_max = 0x07D0
+        elif function_code in [Const.READ_COILS, Const.WRITE_SINGLE_COIL, Const.WRITE_MULTIPLE_COILS]:
+            object_count = len(self.coils)
+            quantity_max = 0x07D0
+        elif function_code == Const.READ_INPUT_REGISTER:
+            object_count = len(self.input_registers)
+            quantity_max = 0x007D
+        else: # Holding register
+            object_count = len(self.holding_registers)
+            quantity_max = 0x007D
+        
+        if quantity is not None and (quantity < 1 or quantity > quantity_max):
+            return False
+
+        if quantity == None:
+            quantity = 0
+
+        if quantity + address > object_count:
+            return False
+        else: 
+            return True
+
 
 class ModbusException(Exception):
-    def __init__(self, function_code, exception_code):
+    def __init__(self, function_code, exception_code, instance):
+        instance.send_exception_response(instance.unit_addr, function_code, exception_code)
         self.function_code = function_code
         self.exception_code = exception_code
