@@ -145,8 +145,6 @@ class TCPServer(Server):
             return None
         try:
             r = self.handle_request(req_uid_and_pdu)
-            self._client_sock.close()
-            self._client_sock = None
             return r
         except ModbusException as e:
             # print("Modbus request error:", e)
