@@ -33,14 +33,18 @@ comm = helpers.get_serial(1, mode=232, baudrate=115200)
 mb_server = RTUServer(
     comm,
     unit_addr=1,
-    number_coils=32,
-    number_input_registers=255,
-    number_discrete_inputs=16,
+    number_coils=20,
+    number_input_registers=0xFF,
+    number_discrete_inputs=0x10,
     number_holding_registers=10,
 )
 
-mb_server.input_registers = list(range(255))  # set input register value to their address
+mb_server.input_registers[0:] = list(range(0xFF)) # set input registers 0-255 to 0-255
+
 mb_server.discrete_inputs[5] = True  # set input register 5 to True
+
+mb_server.holding_registers.signed[1] = True # set holding register 1 to use 16-bit signed values
+
 count = 0
 
 while True:
@@ -48,6 +52,7 @@ while True:
     mb_server.poll(timeout=.5) # Regularly poll the modbus server to handle incoming requests
     mb_server.discrete_inputs[0] = switch.value  # set discrete input 0 to switch value
     mb_server.holding_registers[0] = count  # set holding register 0 to count value
+    mb_server.holding_registers[1] = -count  # set holding register 1 to negative count value
     led.value = mb_server.coils[0]  # set led to output value
     
     count += 1

@@ -97,16 +97,7 @@ def response(function_code, request_register_addr, request_register_qty, request
         return struct.pack('>BB' + fmt, function_code, ((len(value_list) - 1) // 8) + 1, *output_value)
 
     elif function_code in [Const.READ_HOLDING_REGISTERS, Const.READ_INPUT_REGISTER]:
-        quantity = len(value_list)
-
-        if signed == True or signed == False:
-            fmt = ('h' if signed else 'H') * quantity
-        else:
-            fmt = ''
-            for s in signed:
-                fmt += 'h' if s else 'H'
-
-        return struct.pack('>BB' + fmt, function_code, quantity * 2, *value_list)
+        return struct.pack('>BB', function_code, len(value_list)) + value_list
 
     elif function_code in [Const.WRITE_SINGLE_COIL, Const.WRITE_SINGLE_REGISTER]:
         return struct.pack('>BHBB', function_code, request_register_addr, *request_data)

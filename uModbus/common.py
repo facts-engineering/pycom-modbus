@@ -117,10 +117,10 @@ class Server:
             self.discrete_inputs = [0] * number_discrete_inputs
       
         if number_input_registers is not None:
-            self.input_registers = [0] * number_input_registers
+            self.input_registers = _ValueRegisters(number_input_registers)
 
         if number_holding_registers is not None:
-            self.holding_registers = [0] * number_holding_registers
+            self.holding_registers = _ValueRegisters(number_holding_registers)
 
        
     def handle_request(self, data):
@@ -148,9 +148,10 @@ class Server:
                 return
 
             if function_code == Const.READ_HOLDING_REGISTERS:
-                data = self.holding_registers[address:address+quantity]
+                data = self.holding_registers.raw[address:address+quantity]
             else:
-                data = self.input_registers[address:address+quantity]
+                data = self.input_registers.raw[address:address+quantity]
+            data = b''.join(data)
 
         elif function_code == Const.WRITE_SINGLE_COIL:
             quantity = None
@@ -170,7 +171,7 @@ class Server:
             if not self._within_limits(function_code, quantity, address):
                 self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
                 return
-            self.holding_registers[address] = self.data_as_registers(data, 1)[0]
+            self.holding_registers.raw[address] = data
             # all values allowed
 
         elif function_code == Const.WRITE_MULTIPLE_COILS:
@@ -193,7 +194,7 @@ class Server:
             if len(data) != quantity * 2:
                 self.send_exception(function_code, Const.ILLEGAL_DATA_ADDRESS)
                 raise ModbusException(function_code, Const.ILLEGAL_DATA_VALUE, self)
-            self.holding_registers[address:address+quantity] = [i for i in self.data_as_registers(data, quantity)]
+            self.holding_registers.raw[address:address+quantity] = [data[i:i+2] for i in range(0, quantity*2, 2)]
 
         else:
             # Not implemented functions
@@ -229,14 +230,6 @@ class Server:
                 if len(bits) == quantity:
                     return bits
 
-    def data_as_registers(self, data, quantity, signed=False):
-        if quantity is not None:
-            qty = quantity  
-        else: 
-            qty = 1
-        fmt = ('h' if signed else 'H') * qty
-        return struct.unpack('>' + fmt, data)
-
     def _within_limits(self, function_code, quantity, address):
        
         if function_code == Const.READ_DISCRETE_INPUTS:
@@ -269,3 +262,62 @@ class ModbusException(Exception):
         instance.send_exception_response(instance.unit_addr, function_code, exception_code)
         self.function_code = function_code
         self.exception_code = exception_code
+
+
+class _ValueRegisters():
+    def __init__(self, length):
+        self.raw = [bytes(2)] * length
+        self.signed = [False] * length
+        self.byteswap = [False] * length
+
+    def __len__(self):
+        return len(self.raw)
+
+    def __setitem__(self, index, value):
+        if isinstance(index, int):
+            self._set_value(index, value)
+        elif isinstance(index, slice):
+            start = index.start
+            if start is None:
+                start = 0
+            end = index.stop
+            if end is None:
+                end = len(self)
+
+            for i in range(start, end):
+                self._set_value(i, value[i-start])
+
+        else:
+            raise TypeError('Index must be an integer or slice')
+            
+
+    def __getitem__(self, index):
+        if isinstance(index, int):
+            return self._get_value(index)
+        elif isinstance(index, slice):
+            start = index.start
+            if start is None:
+                start = 0
+            end = index.stop
+            if end is None:
+                end = len(self)
+
+            return [self._get_value(i) for i in range(start, end)]
+        else:
+            raise TypeError('Index must be an integer or slice')
+
+    def _set_value(self, index, value):
+        format = '<' if self.byteswap[index] else '>'
+        format += 'h' if self.signed[index] else 'H'
+
+        try:
+            self.raw[index] = struct.pack(format, value)
+        except OverflowError:
+            raise OverflowError(f'Address {index} value {value} must be between {((-32768 if self.signed[index] else 0))} and {(32767 if self.signed[index] else 65535)}')
+
+
+    def _get_value(self, index):
+        format = '<' if self.byteswap[index] else '>'
+        format += 'h' if self.signed[index] else 'H'
+
+        return struct.unpack(format, self.raw[index])[0]
