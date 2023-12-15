@@ -283,6 +283,7 @@ class _ValueRegisters():
             end = index.stop
             if end is None:
                 end = len(self)
+            end = min(end, start + len(value))
 
             for i in range(start, end):
                 self._set_value(i, value[i-start])
