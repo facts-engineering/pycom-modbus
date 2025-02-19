@@ -13,8 +13,9 @@ import time
 import board
 import busio
 import digitalio
+import adafruit_connection_manager
 from adafruit_wiznet5k.adafruit_wiznet5k import WIZNET5K
-import adafruit_wiznet5k.adafruit_wiznet5k_socket as socket
+import adafruit_wiznet5k.adafruit_wiznet5k_socketpool as socket
 from uModBus.tcp import TCPClient
 
 def clear_terminal():
@@ -24,12 +25,12 @@ def clear_terminal():
 cs = digitalio.DigitalInOut(board.D5)
 spi_bus = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
 eth = WIZNET5K(spi_bus, cs, is_dhcp=True)
-socket.set_interface(eth)
+pool = adafruit_connection_manager.get_radio_socketpool(eth)
 print(eth.pretty_ip(eth.ip_address))
 
-client_ip = '192.168.1.177'
+client_ip = '192.168.1.101'
 unit_id = 255
-mb_client = TCPClient(socket, client_ip, default_unit_id=unit_id)
+mb_client = TCPClient(pool, client_ip, default_unit_id=unit_id)
 
 counter = 0
 while True:
